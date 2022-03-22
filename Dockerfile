@@ -1,4 +1,4 @@
-FROM alpine:3.14 AS builder
+FROM alpine:3.14 AS base
 
 USER root 
 
@@ -100,7 +100,146 @@ RUN \
   mkdir /opt/app-root && \
   chown node:node /opt/app-root
 
-FROM builder
+RUN \
+  touch /opt/app-root/app.log && \
+  chown node:node /opt/app-root/app.log && \
+  chmod 0750 /opt/app-root/app.log
+
+
+###################################
+# Postgres
+###################################
+FROM base as dev_postgresql
+
+ENV LANG en_US.utf8
+ENV PGPORT 5432
+ENV POSTGRES_HOST_AUTH_METHOD trust
+ENV PGUSER postgres:-postgres
+ENV PGDATA /pgdata
+
+WORKDIR /opt/app-root
+
+COPY entrypoint-*.sh /
+RUN find / -type f -name 'entrypoint-*.sh' -exec chown -R 755 {} \;
+RUN find / -type f -name 'entrypoint-*.sh' -exec chown -R node:node {} \;
+RUN find / -type f -name 'entrypoint-*.sh' -exec chmod +x {} \;
+
+RUN \
+  apk --update add postgresql && \
+  rm -rf /var/cache/apk/*
+
+RUN set -eux; \
+  chown -R node:postgres /var/lib/postgresql
+
+RUN mkdir -p "$PGDATA" && chown -R postgres:postgres "$PGDATA" && chmod 0750 "$PGDATA"
+
+RUN \
+  mkdir -p /var/log/postgresql && \
+  mkdir -p /run/postgresql && \
+  chown postgres:postgres /run/postgresql -R && \
+  chmod g+rwx /run/postgresql -R  && \
+  chown "1000:1000" /run -R
+
+VOLUME ["/run/postgresql", "/var/lib/postgresql/data"]
+
+USER postgres
+RUN initdb --username=postgres --auth=trust --auth-local=trust --pgdata="$PGDATA"
+RUN sed -i 's#unix_socket_directories#\#unix_socket_directories#i' "$PGDATA/postgresql.conf"
+RUN echo -e "host all all all trust\n" >> "$PGDATA/pg_hba.conf"
+RUN echo -e "listen_addresses = '*'\n" >> "$PGDATA/postgresql.conf"
+RUN echo -e "log_directory = 'log'\n" >> "$PGDATA/postgresql.conf"
+RUN echo -e "log_file_mode = 0600\n" >> "$PGDATA/postgresql.conf"
+RUN echo -e "log_destination = 'stderr'\n" >> "$PGDATA/postgresql.conf"
+RUN echo -e "port=5432\n" >> "$PGDATA/postgresql.conf"
+RUN echo -e "unix_socket_directories = '/run/postgresql,/tmp'\n" >> "$PGDATA/postgresql.conf"
+
+USER root
+RUN chown -R "1000:1000" "$PGDATA" && chmod 0750 "$PGDATA"
+RUN chown -R "1000:1000" "/var/lib/postgresql" && chmod 0750 "/var/lib/postgresql"
+RUN chown -R "1000:1000" "/var/log/postgresql" && chmod 0750 "/var/log/postgresql"
+
+
+###################################
+# Redis - Postgres
+###################################
+FROM dev_postgresql as dev_redis
+
+COPY entrypoint-*.sh /
+RUN find / -type f -name 'entrypoint-*.sh' -exec chown -R 755 {} \;
+RUN find / -type f -name 'entrypoint-*.sh' -exec chown -R node:node {} \;
+RUN find / -type f -name 'entrypoint-*.sh' -exec chmod +x {} \;
+
+RUN \
+  apk --update add redis && \
+  rm -rf /var/cache/apk/*
+
+RUN \
+  mkdir /data-redis && \
+  mkdir -p /var/log/redis && \
+  chown -R redis:redis /data-redis && \
+  sed -i 's#logfile /var/log/redis/redis.log#logfile ""#i' /etc/redis.conf && \
+  # sed -i 's#daemonize yes#daemonize no#i' /etc/redis.conf && \
+  sed -i 's#dir /var/lib/redis#dir /data-redis#i' /etc/redis.conf && \
+  echo -e "# placeholder for local options\n" /ect/redis-local.conf && \
+  echo -e "include /etc/redis-local.conf" >> /etc/redis.conf
+
+VOLUME ["/data-redis"]
+
+
+###################################
+# Postgres Sandbox
+###################################
+FROM dev_postgresql as sandbox-postgresql
+
+USER node
+
+COPY package*.json ./
+COPY node_modules ./node_modules
+COPY health-checks ./health-checks
+COPY src ./src
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+CMD ["bash", "-c", "printenv & sleep 10 & /entrypoint-postgres.sh && /entrypoint-node.sh"]
+
+###################################
+# Redis Sandbox
+###################################
+FROM dev_redis as sandbox_redis
+
+USER node
+
+COPY package*.json ./
+COPY node_modules ./node_modules
+COPY health-checks ./health-checks
+COPY src ./src
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+
+CMD ["bash", "-c", "printenv & sleep 10 & /entrypoint-redis.sh & /entrypoint-postgres.sh & /entrypoint-node.sh"]
+
+###################################
+# Postgres Sandbox
+###################################
+FROM dev_redis as sandbox_bash
+
+USER node
+
+COPY package*.json ./
+COPY node_modules ./node_modules
+COPY health-checks ./health-checks
+COPY src ./src
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["bash"]
+
+###################################
+# Node Sandbox
+###################################
+FROM base as sandbox_nodejs
 
 USER node
 
@@ -112,4 +251,4 @@ EXPOSE 3000
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 
-CMD ["bash", "-c", "node ./src/index.js"]
+CMD ["bash", "-c", "printenv & sleep 10 && /entrypoint-node.sh"]
