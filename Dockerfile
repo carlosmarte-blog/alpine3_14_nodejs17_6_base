@@ -115,6 +115,8 @@ ENV LANG en_US.utf8
 ENV PGPORT 5432
 ENV POSTGRES_HOST_AUTH_METHOD trust
 ENV PGUSER postgres:-postgres
+ENV POSTGRES_USER postgres
+ENV POSTGRES_DB postgres
 ENV PGDATA /pgdata
 
 WORKDIR /opt/app-root
@@ -246,6 +248,7 @@ USER node
 WORKDIR /opt/app-root
 COPY package*.json ./
 COPY node_modules ./node_modules
+COPY health-checks ./health-checks
 COPY src ./src
 EXPOSE 3000
 
